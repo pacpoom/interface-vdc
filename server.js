@@ -1,4 +1,3 @@
-// โหลดแพ็กเกจที่จำเป็น
 const express = require('express');
 const mysql = require('mysql2/promise');
 const jwt = require('jsonwebtoken');
@@ -74,12 +73,6 @@ const authenticateToken = (req, res, next) => {
         next(); 
     });
 };
-
-// Route: GET /
-app.get('/', (req, res) => {
-    res.send('<h1>Express Server Running</h1><p>Database connection status printed in console. Use /api/login to get a token.</p>');
-});
-
 
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body; 
