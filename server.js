@@ -11,6 +11,21 @@ const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret';
 
 app.use(express.json());
 
+// --- เพิ่ม: Error Handler สำหรับ JSON Syntax Error ---
+// ช่วยแจ้งเตือนกรณีส่ง JSON ผิดรูปแบบ แทนที่จะปล่อยให้ Server แจ้ง Error ยาวๆ
+app.use((err, req, res, next) => {
+    if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+        console.error('❌ JSON Parse Error:', err.message);
+        return res.status(400).json({ 
+            error: 'Invalid JSON format', 
+            message: 'รูปแบบ JSON ไม่ถูกต้อง กรุณาตรวจสอบเครื่องหมาย " หรือ , ใน Body',
+            details: err.message 
+        });
+    }
+    next();
+});
+// ------------------------------------------------
+
 const dbConfig = {
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
@@ -225,14 +240,14 @@ app.post('/api/receiving', authenticateToken, async (req, res) => {
     
     console.log(`Authenticated User ${req.user.username} attempting to update pdiin_flg.`); 
 
-    const { vin_number, pdiin_flg } = req.body; 
+    const { vin_number, pdiin_flg, date_time } = req.body; 
 
-    // Note: Assuming pdiin_flg should be sent as a number (0 or 1)
-    if (!vin_number || pdiin_flg === undefined) {
-        await saveLog('WARN', 'api_receiving', 'Invalid Input', 'Missing vin_number or pdiin_flg', req.user.username);
+    // Validate Input: vin_number, pdiin_flg, and date_time are required
+    if (!vin_number || pdiin_flg === undefined || !date_time) {
+        await saveLog('WARN', 'api_receiving', 'Invalid Input', 'Missing vin_number, pdiin_flg or date_time', req.user.username);
         return res.status(400).json({ 
             error: 'Invalid Input', 
-            message: 'Both vin_number (string) and pdiin_flg (number) are required in the request body.' 
+            message: 'vin_number (string), pdiin_flg (number), and date_time (string) are required in the request body.' 
         });
     }
 
@@ -244,6 +259,9 @@ app.post('/api/receiving', authenticateToken, async (req, res) => {
             message: 'pdiin_flg must be either 0 or 1.' 
         });
     }
+
+    // Format date_time from YYYY/MM/DD HH:mm:ss to YYYY-MM-DD HH:mm:ss for MySQL
+    const formattedDate = date_time.replace(/\//g, '-');
 
     try {
 
@@ -270,9 +288,10 @@ app.post('/api/receiving', authenticateToken, async (req, res) => {
             });
         }
         
+        // Update both pdiin_flg and pdiin_time
         const [result] = await pool.query(
-            'UPDATE gaoff SET pdiin_flg = ? WHERE vin_number = ?',
-            [flagValue, vin_number]
+            'UPDATE gaoff SET pdiin_flg = ?, pdiin_time = ? WHERE vin_number = ?',
+            [flagValue, formattedDate, vin_number]
         );
 
 
@@ -285,13 +304,14 @@ app.post('/api/receiving', authenticateToken, async (req, res) => {
         }
         
         // Log Receiving Update
-        await saveLog('INFO', 'api_receiving', `Updated pdiin_flg to ${flagValue}`, `VIN: ${vin_number}`, req.user.username);
+        await saveLog('INFO', 'api_receiving', `Updated pdiin_flg to ${flagValue} at ${formattedDate}`, `VIN: ${vin_number}`, req.user.username);
 
         return res.status(200).json({
             status: 1,
             message: `Successfully updated pdiin_flg to ${flagValue} for VIN: ${vin_number}.`,
             currentPdiinFlg: currentPdiinFlg,
-            rows_affected: result.affectedRows
+            rows_affected: result.affectedRows,
+            received_at: formattedDate
         });
 
     } catch (error) {
@@ -305,19 +325,22 @@ app.post('/api/receiving', authenticateToken, async (req, res) => {
 });
 
 // New Route: PUT /api/delivery (Secured)
-app.put('/api/delivery', authenticateToken, async (req, res) => {
+app.post('/api/delivery', authenticateToken, async (req, res) => {
     
     console.log(`Authenticated User ${req.user.username} attempting to update delivery_flg.`); 
 
-    const { vin_number } = req.body; 
+    const { vin_number, date_time } = req.body; 
 
-    if (!vin_number) {
-        await saveLog('WARN', 'api_delivery', 'Invalid Input', 'Missing vin_number', req.user.username);
+    if (!vin_number || !date_time) {
+        await saveLog('WARN', 'api_delivery', 'Invalid Input', 'Missing vin_number or date_time', req.user.username);
         return res.status(400).json({ 
             error: 'Invalid Input', 
-            message: 'VIN number is required in the request body.' 
+            message: 'vin_number and date_time are required in the request body.' 
         });
     }
+
+    // Format date_time from YYYY/MM/DD HH:mm:ss to YYYY-MM-DD HH:mm:ss for MySQL
+    const formattedDate = date_time.replace(/\//g, '-');
 
     try {
         // SELECT delivery_flg and pdiin_flg
@@ -361,18 +384,19 @@ app.put('/api/delivery', authenticateToken, async (req, res) => {
         //Condition 3: delivery_flg == 0 AND pdiin_flg == 1 (Ready to update)
         if (vehicleData.delivery_flg === 0 && vehicleData.pdiin_flg === 1) {
              const [updateResult] = await pool.query(
-                'UPDATE gaoff SET delivery_flg = 1 WHERE vin_number = ?',
-                [vin_number]
+                'UPDATE gaoff SET delivery_flg = 1, delivery_time = ? WHERE vin_number = ?',
+                [formattedDate, vin_number]
             );
 
             if (updateResult.affectedRows === 1) {
                 
-                await saveLog('INFO', 'api_delivery', 'Delivery Update Success', `VIN: ${vin_number}`, req.user.username);
+                await saveLog('INFO', 'api_delivery', `Delivery Update Success at ${formattedDate}`, `VIN: ${vin_number}`, req.user.username);
 
                 return res.status(200).json({
                     status: 1, // Success status
                     message: `Successfully updated delivery_flg to 1 for VIN: ${vin_number}.`,
-                    vin_number: vin_number
+                    vin_number: vin_number,
+                    delivery_at: formattedDate
                 });
             }
         }
