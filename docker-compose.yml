@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: node_api_server
+    restart: always
+    ports:
+      # Map Port 8085 (เครื่องเรา) -> 4000 (Container)
+      - "8085:4000"
+    environment:
+      - PORT=4000
+      - DB_HOST=${DB_HOST}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - DB_PORT=${DB_PORT}
+      - JWT_SECRET=${JWT_SECRET}
+    networks:
+      - app_network
+
+networks:
+  app_network:
+    driver: bridge

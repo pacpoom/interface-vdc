@@ -5,7 +5,7 @@ const bcrypt = require('bcrypt');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 4000;
 
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret';
 
@@ -15,12 +15,15 @@ app.use(express.json());
 // ช่วยแจ้งเตือนกรณีส่ง JSON ผิดรูปแบบ แทนที่จะปล่อยให้ Server แจ้ง Error ยาวๆ
 app.use((err, req, res, next) => {
     if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
-        console.error('❌ JSON Parse Error:', err.message);
-        return res.status(400).json({ 
+        const errorResponse = { 
             error: 'Invalid JSON format', 
             message: 'รูปแบบ JSON ไม่ถูกต้อง กรุณาตรวจสอบเครื่องหมาย " หรือ , ใน Body',
             details: err.message 
-        });
+        };
+        console.error('❌ JSON Parse Error:', err.message);
+        // Log Error Response
+        saveLog('ERROR', 'middleware_json', 'JSON Parse Error', errorResponse, 'SYSTEM');
+        return res.status(400).json(errorResponse);
     }
     next();
 });
@@ -97,20 +100,24 @@ const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
 
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ 
+        const errorResponse = { 
             error: 'Access Denied', 
             message: 'Authorization header format must be "Bearer <token>".' 
-        });
+        };
+        // Log auth failure (Optional: might be too noisy)
+        // saveLog('WARN', 'middleware_auth', 'Missing/Invalid Header', errorResponse, 'UNKNOWN');
+        return res.status(401).json(errorResponse);
     }
 
     const token = authHeader.split(' ')[1];
 
     jwt.verify(token, JWT_SECRET, (err, user) => {
         if (err) {
-            return res.status(403).json({ 
+            const errorResponse = { 
                 error: 'Forbidden', 
                 message: 'Invalid, expired, or tampered token.' 
-            });
+            };
+            return res.status(403).json(errorResponse);
         }
         req.user = user; 
         next(); 
@@ -121,8 +128,9 @@ app.post('/api/login', async (req, res) => {
     const { username, password } = req.body; 
 
     if (!username || !password) {
-        await saveLog('WARN', 'api_login', 'Login Failed: Missing credentials', 'Username or password empty', 'UNKNOWN');
-        return res.status(400).json({ error: 'Authentication failed', message: 'Username and password are required.' });
+        const errorResponse = { error: 'Authentication failed', message: 'Username and password are required.' };
+        await saveLog('WARN', 'api_login', 'Login Failed: Missing credentials', errorResponse, 'UNKNOWN');
+        return res.status(400).json(errorResponse);
     }
 
     try {
@@ -133,20 +141,23 @@ app.post('/api/login', async (req, res) => {
 
         const user = users[0];
         if (!user) {
-            await saveLog('WARN', 'api_login', 'Login Failed: Invalid Username', `Username: ${username}`, 'UNKNOWN');
-            return res.status(401).json({ error: 'Authentication failed', message: 'Invalid username' });
+            const errorResponse = { error: 'Authentication failed', message: 'Invalid username' };
+            await saveLog('WARN', 'api_login', 'Login Failed: Invalid Username', errorResponse, 'UNKNOWN');
+            return res.status(401).json(errorResponse);
         }
         
         const isPasswordValid = await bcrypt.compare(password, user.password_hash);
 
         if (!isPasswordValid) {
-            await saveLog('WARN', 'api_login', 'Login Failed: Invalid Password', `Username: ${username}`, 'UNKNOWN');
-            return res.status(401).json({ error: 'Authentication failed', message: 'Invalid username or password.' });
+            const errorResponse = { error: 'Authentication failed', message: 'Invalid username or password.' };
+            await saveLog('WARN', 'api_login', 'Login Failed: Invalid Password', errorResponse, username);
+            return res.status(401).json(errorResponse);
         }
         
         if (user.api_key_status !== 1) {
-            await saveLog('WARN', 'api_login', 'Login Failed: Inactive API Key', `Username: ${username}`, username);
-            return res.status(403).json({ error: 'Access Denied', message: 'API key is inactive.' });
+            const errorResponse = { error: 'Access Denied', message: 'API key is inactive.' };
+            await saveLog('WARN', 'api_login', 'Login Failed: Inactive API Key', errorResponse, username);
+            return res.status(403).json(errorResponse);
         }
 
         const userPayload = { 
@@ -157,19 +168,22 @@ app.post('/api/login', async (req, res) => {
 
         const accessToken = jwt.sign(userPayload, JWT_SECRET, { expiresIn: '1h' });
 
-        // Log successful login
-        await saveLog('INFO', 'api_login', `User ${username} logged in`, null, username);
-
-        return res.status(200).json({
+        const successResponse = {
             message: `Login successful for user: ${user.username}. Use this token for secured endpoints.`,
             accessToken: accessToken,
             user: userPayload
-        });
+        };
+
+        // Log successful login with RESPONSE details
+        await saveLog('INFO', 'api_login', `User ${username} logged in`, successResponse, username);
+
+        return res.status(200).json(successResponse);
         
     } catch (error) {
         console.error('Error during login process:', error.message);
-        await saveLog('ERROR', 'api_login', 'Internal Server Error', error.message, 'SYSTEM');
-        res.status(500).json({ error: 'Internal Server Error', message: error.message });
+        const errorResponse = { error: 'Internal Server Error', message: error.message };
+        await saveLog('ERROR', 'api_login', 'Internal Server Error', errorResponse, 'SYSTEM');
+        res.status(500).json(errorResponse);
     }
 });
 
@@ -180,12 +194,14 @@ app.get('/api/vehicle_no/:vin_number', authenticateToken, async (req, res) => {
     const vinNumber = req.params.vin_number; 
 
     if (!vinNumber) {
-        return res.status(400).json({ error: 'VIN number is required in the path.' });
+        const errorResponse = { error: 'VIN number is required in the path.' };
+        await saveLog('WARN', 'api_get_vehicle', 'Missing VIN in path', errorResponse, req.user.username);
+        return res.status(400).json(errorResponse);
     }
     
     try {
-        // Log the query attempt
-        await saveLog('INFO', 'api_get_vehicle', 'Query VIN', `VIN: ${vinNumber}`, req.user.username);
+        // Log the query attempt (Request Log)
+        await saveLog('INFO', 'api_get_vehicle', 'Query VIN Attempt', `Requesting VIN: ${vinNumber}`, req.user.username);
 
         const [rows] = await pool.query(
             'SELECT * FROM gaoff WHERE vin_number = ?',
@@ -193,46 +209,55 @@ app.get('/api/vehicle_no/:vin_number', authenticateToken, async (req, res) => {
         );
 
         if (rows.length === 0) {
-            await saveLog('INFO', 'api_get_vehicle', 'VIN Not Found', `VIN: ${vinNumber}`, req.user.username);
-            return res.status(404).json({
+            const notFoundResponse = {
                 status: 0,
                 vin_number: vinNumber,
                 message: 'No Data'
-            });
+            };
+            // Log Response (Not Found)
+            await saveLog('INFO', 'api_get_vehicle', 'VIN Not Found', notFoundResponse, req.user.username);
+            return res.status(404).json(notFoundResponse);
         }
         
         const vehicleData = rows[0];
+        let successResponse;
 
         if (vehicleData.pdiin_flg === 1) {
-            return res.status(200).json({ 
-            status: 2,
-            vehicle_number: vehicleData.vin_number,
-            vehicle_code: vehicleData.vc_code,
-            engine_code: vehicleData.engine_code,
-            ga_off_time: vehicleData.ga_off_time,
-            pdiin_flg: vehicleData.pdiin_flg,
-            message: 'Received'
-            });
-        } 
+            successResponse = { 
+                status: 2,
+                vehicle_number: vehicleData.vin_number,
+                vehicle_code: vehicleData.vc_code,
+                engine_code: vehicleData.engine_code,
+                ga_off_time: vehicleData.ga_off_time,
+                pdiin_flg: vehicleData.pdiin_flg,
+                message: 'Received'
+            };
+        } else {
+            successResponse = {
+                status: 1,
+                vehicle_number: vehicleData.vin_number,
+                vehicle_code: vehicleData.vc_code,
+                engine_code: vehicleData.engine_code,
+                ga_off_time: vehicleData.ga_off_time,
+                pdiin_flg: vehicleData.pdiin_flg,
+                message: 'Waiting Receive'
+            };
+        }
+
+        // Log Response (Success)
+        await saveLog('INFO', 'api_get_vehicle', 'VIN Query Success', successResponse, req.user.username);
         
-        return res.status(200).json({
-            status: 1,
-            vehicle_number: vehicleData.vin_number,
-            vehicle_code: vehicleData.vc_code,
-            engine_code: vehicleData.engine_code,
-            ga_off_time: vehicleData.ga_off_time,
-            pdiin_flg: vehicleData.pdiin_flg,
-            message: 'Waiting Receive'
-        });
+        return res.status(200).json(successResponse);
         
 
     } catch (error) {
         console.error('Error fetching vehicle number:', error.message);
-        await saveLog('ERROR', 'api_get_vehicle', 'Error fetching vehicle', error.message, req.user.username);
-        res.status(500).json({
+        const errorResponse = {
             error: 'Internal Server Error while querying the database.',
             details: error.message
-        });
+        };
+        await saveLog('ERROR', 'api_get_vehicle', 'Error fetching vehicle', errorResponse, req.user.username);
+        res.status(500).json(errorResponse);
     }
 });
 
@@ -242,25 +267,27 @@ app.post('/api/receiving', authenticateToken, async (req, res) => {
 
     const { vin_number, pdiin_flg, date_time } = req.body; 
 
-    // Validate Input: vin_number, pdiin_flg, and date_time are required
+    // Validate Input
     if (!vin_number || pdiin_flg === undefined || !date_time) {
-        await saveLog('WARN', 'api_receiving', 'Invalid Input', 'Missing vin_number, pdiin_flg or date_time', req.user.username);
-        return res.status(400).json({ 
+        const errorResponse = { 
             error: 'Invalid Input', 
             message: 'vin_number (string), pdiin_flg (number), and date_time (string) are required in the request body.' 
-        });
+        };
+        await saveLog('WARN', 'api_receiving', 'Invalid Input', errorResponse, req.user.username);
+        return res.status(400).json(errorResponse);
     }
 
     const flagValue = parseInt(pdiin_flg, 10);
     if (flagValue !== 0 && flagValue !== 1) {
-         await saveLog('WARN', 'api_receiving', 'Invalid Flag Value', `pdiin_flg: ${pdiin_flg}`, req.user.username);
-         return res.status(400).json({ 
+         const errorResponse = { 
             error: 'Invalid Flag Value', 
             message: 'pdiin_flg must be either 0 or 1.' 
-        });
+        };
+         await saveLog('WARN', 'api_receiving', 'Invalid Flag Value', errorResponse, req.user.username);
+         return res.status(400).json(errorResponse);
     }
 
-    // Format date_time from YYYY/MM/DD HH:mm:ss to YYYY-MM-DD HH:mm:ss for MySQL
+    // Format date_time
     const formattedDate = date_time.replace(/\//g, '-');
 
     try {
@@ -271,56 +298,61 @@ app.post('/api/receiving', authenticateToken, async (req, res) => {
         );
         
         if (checkRows.length === 0) {
-             await saveLog('WARN', 'api_receiving', 'VIN Not Found', `VIN: ${vin_number}`, req.user.username);
-             return res.status(404).json({
+             const notFoundResponse = {
                 status: 0,
                 message: `Failed to update. VIN number '${vin_number}' not found in gaoff table.`,
-            });
+            };
+             await saveLog('WARN', 'api_receiving', 'VIN Not Found', notFoundResponse, req.user.username);
+             return res.status(404).json(notFoundResponse);
         }
         
         const currentPdiinFlg = checkRows[0].pdiin_flg;
 
         if (currentPdiinFlg === 1) {
-             await saveLog('INFO', 'api_receiving', 'Already Received', `VIN: ${vin_number}`, req.user.username);
-             return res.status(409).json({
+             const conflictResponse = {
                 status: 2,
                 message: `Vehicle with VIN '${vin_number}' has already been received (pdiin_flg is already 1).`,
-            });
+            };
+             await saveLog('INFO', 'api_receiving', 'Already Received', conflictResponse, req.user.username);
+             return res.status(409).json(conflictResponse);
         }
         
-        // Update both pdiin_flg and pdiin_time
+        // Update
         const [result] = await pool.query(
             'UPDATE gaoff SET pdiin_flg = ?, pdiin_time = ? WHERE vin_number = ?',
             [flagValue, formattedDate, vin_number]
         );
 
-
         if (result.affectedRows === 0) {
-            await saveLog('ERROR', 'api_receiving', 'Update Failed Unexpectedly', `VIN: ${vin_number}`, req.user.username);
-            return res.status(500).json({
+            const errorResponse = {
                 status: 0,
                 message: `Update failed unexpectedly for VIN: ${vin_number}.`,
-            });
+            };
+            await saveLog('ERROR', 'api_receiving', 'Update Failed Unexpectedly', errorResponse, req.user.username);
+            return res.status(500).json(errorResponse);
         }
         
-        // Log Receiving Update
-        await saveLog('INFO', 'api_receiving', `Updated pdiin_flg to ${flagValue} at ${formattedDate}`, `VIN: ${vin_number}`, req.user.username);
-
-        return res.status(200).json({
+        const successResponse = {
             status: 1,
             message: `Successfully updated pdiin_flg to ${flagValue} for VIN: ${vin_number}.`,
             currentPdiinFlg: currentPdiinFlg,
             rows_affected: result.affectedRows,
             received_at: formattedDate
-        });
+        };
+
+        // Log Receiving Update Response
+        await saveLog('INFO', 'api_receiving', `Updated pdiin_flg to ${flagValue}`, successResponse, req.user.username);
+
+        return res.status(200).json(successResponse);
 
     } catch (error) {
         console.error('Error updating pdiin_flg:', error.message);
-        await saveLog('ERROR', 'api_receiving', 'Error updating pdiin_flg', error.message, req.user.username);
-        res.status(500).json({
+        const errorResponse = {
             error: 'Internal Server Error while updating the database.',
             details: error.message
-        });
+        };
+        await saveLog('ERROR', 'api_receiving', 'Error updating pdiin_flg', errorResponse, req.user.username);
+        res.status(500).json(errorResponse);
     }
 });
 
@@ -332,14 +364,15 @@ app.post('/api/delivery', authenticateToken, async (req, res) => {
     const { vin_number, date_time } = req.body; 
 
     if (!vin_number || !date_time) {
-        await saveLog('WARN', 'api_delivery', 'Invalid Input', 'Missing vin_number or date_time', req.user.username);
-        return res.status(400).json({ 
+        const errorResponse = { 
             error: 'Invalid Input', 
             message: 'vin_number and date_time are required in the request body.' 
-        });
+        };
+        await saveLog('WARN', 'api_delivery', 'Invalid Input', errorResponse, req.user.username);
+        return res.status(400).json(errorResponse);
     }
 
-    // Format date_time from YYYY/MM/DD HH:mm:ss to YYYY-MM-DD HH:mm:ss for MySQL
+    // Format date_time
     const formattedDate = date_time.replace(/\//g, '-');
 
     try {
@@ -349,36 +382,39 @@ app.post('/api/delivery', authenticateToken, async (req, res) => {
             [vin_number]
         );
         
-        const vehicleData = rows[0];
-
         // Check if VIN exists
         if (rows.length === 0) {
-            await saveLog('WARN', 'api_delivery', 'VIN Not Found', `VIN: ${vin_number}`, req.user.username);
-            return res.status(404).json({
-                status: 0, // Not Found
+            const notFoundResponse = {
+                status: 0, 
                 message: `VIN number '${vin_number}' not found in System.`,
                 vin_number: vin_number
-            });
+            };
+            await saveLog('WARN', 'api_delivery', 'VIN Not Found', notFoundResponse, req.user.username);
+            return res.status(404).json(notFoundResponse);
         }
+
+        const vehicleData = rows[0];
 
         // Condition 1: delivery_flg == 1 (Vehicle already delivered)
         if (vehicleData.delivery_flg === 1) {
-            await saveLog('INFO', 'api_delivery', 'Already Delivered', `VIN: ${vin_number}`, req.user.username);
-            return res.status(200).json({
-                status: 2, // Custom status for already delivered
+            const conflictResponse = {
+                status: 2, 
                 message: `Vehicle with VIN '${vin_number}' is already marked as delivered.`,
                 vin_number: vin_number
-            });
+            };
+            await saveLog('INFO', 'api_delivery', 'Already Delivered', conflictResponse, req.user.username);
+            return res.status(200).json(conflictResponse);
         }
 
         // Condition 2: pdiin_flg == 0 (Waiting Receive/PDI Incomplete)
         if (vehicleData.pdiin_flg === 0) {
-            await saveLog('INFO', 'api_delivery', 'Waiting Receive', `VIN: ${vin_number} (pdiin=0)`, req.user.username);
-            return res.status(200).json({
-                status: 3, // Custom status for waiting receive
+            const waitingResponse = {
+                status: 3, 
                 message: `Vehicle with VIN '${vin_number}' is waiting for receive (pdiin_flg = 0). Cannot set delivery_flg.`,
                 vin_number: vin_number
-            });
+            };
+            await saveLog('INFO', 'api_delivery', 'Waiting Receive', waitingResponse, req.user.username);
+            return res.status(200).json(waitingResponse);
         }
 
         //Condition 3: delivery_flg == 0 AND pdiin_flg == 1 (Ready to update)
@@ -389,31 +425,34 @@ app.post('/api/delivery', authenticateToken, async (req, res) => {
             );
 
             if (updateResult.affectedRows === 1) {
-                
-                await saveLog('INFO', 'api_delivery', `Delivery Update Success at ${formattedDate}`, `VIN: ${vin_number}`, req.user.username);
-
-                return res.status(200).json({
-                    status: 1, // Success status
+                const successResponse = {
+                    status: 1, 
                     message: `Successfully updated delivery_flg to 1 for VIN: ${vin_number}.`,
                     vin_number: vin_number,
                     delivery_at: formattedDate
-                });
+                };
+                
+                await saveLog('INFO', 'api_delivery', `Delivery Update Success`, successResponse, req.user.username);
+
+                return res.status(200).json(successResponse);
             }
         }
         
-        await saveLog('ERROR', 'api_delivery', 'Logic Error', `VIN: ${vin_number}`, req.user.username);
-        return res.status(500).json({
+        const logicErrorResponse = {
             error: 'Internal Logic Error',
             message: 'An unexpected state occurred during the delivery flag update process.'
-        });
+        };
+        await saveLog('ERROR', 'api_delivery', 'Logic Error', logicErrorResponse, req.user.username);
+        return res.status(500).json(logicErrorResponse);
 
     } catch (error) {
         console.error('Error updating delivery_flg:', error.message);
-        await saveLog('ERROR', 'api_delivery', 'Error updating delivery_flg', error.message, req.user.username);
-        res.status(500).json({
+        const errorResponse = {
             error: 'Internal Server Error while querying the database.',
             details: error.message
-        });
+        };
+        await saveLog('ERROR', 'api_delivery', 'Error updating delivery_flg', errorResponse, req.user.username);
+        res.status(500).json(errorResponse);
     }
 });
 
@@ -433,7 +472,7 @@ async function executeGaOffSync(operatorName = 'SYSTEM') {
     console.log(`${logPrefix} Process started at ${new Date().toISOString()}`);
 
     // DB Log: Start
-    await saveLog('INFO', 'gaoff_sync', 'Sync process started', null, operatorName);
+    await saveLog('INFO', 'gaoff_sync', 'Sync process started', { status: 'started' }, operatorName);
 
     const TARGET_URL = 'https://gvwms-uat.anji-logistics.com/dataway/api';
     const HEADERS = {
@@ -459,15 +498,16 @@ async function executeGaOffSync(operatorName = 'SYSTEM') {
 
         if (rows.length === 0) {
             console.log(`${logPrefix} No pending records found.`);
-            await saveLog('INFO', 'gaoff_sync', 'No pending records found', 'Count: 0', operatorName);
-            return {
+            const noDataResult = {
                 message: 'No pending records found (api_flg = 0).',
                 processed_count: 0
             };
+            await saveLog('INFO', 'gaoff_sync', 'No pending records found', noDataResult, operatorName);
+            return noDataResult;
         }
 
         console.log(`${logPrefix} Found ${rows.length} records to sync.`);
-        await saveLog('INFO', 'gaoff_sync', `Found ${rows.length} records`, null, operatorName);
+        await saveLog('INFO', 'gaoff_sync', `Found ${rows.length} records`, { count: rows.length }, operatorName);
 
         const results = [];
         const errors = [];
@@ -496,14 +536,14 @@ async function executeGaOffSync(operatorName = 'SYSTEM') {
                 } else {
                     console.error(`${logPrefix} Failed to send VIN ${row.vinCode}:`, responseData);
                     // DB Log: Individual Failure
-                    await saveLog('ERROR', 'gaoff_sync', `Failed to send VIN ${row.vinCode}`, JSON.stringify(responseData), operatorName);
+                    await saveLog('ERROR', 'gaoff_sync', `Failed to send VIN ${row.vinCode}`, responseData, operatorName);
                     errors.push({ vin: row.vinCode, status: 'failed', error: responseData });
                 }
 
             } catch (err) {
                 console.error(`${logPrefix} Network error sending VIN ${row.vinCode}:`, err.message);
                 // DB Log: Network Error
-                await saveLog('ERROR', 'gaoff_sync', `Network error VIN ${row.vinCode}`, err.message, operatorName);
+                await saveLog('ERROR', 'gaoff_sync', `Network error VIN ${row.vinCode}`, { message: err.message }, operatorName);
                 errors.push({ vin: row.vinCode, status: 'network_error', error: err.message });
             }
         }
@@ -514,20 +554,7 @@ async function executeGaOffSync(operatorName = 'SYSTEM') {
         const [updRes] = await pool.query(sqlUpdate);
         updateResult = updRes;
 
-        console.log(`${logPrefix} Sync completed. Success: ${results.length}, Errors: ${errors.length}, DB Updated: ${updateResult.affectedRows}`);
-        
-        // DB Log: Completion Summary
-        await saveLog('INFO', 'gaoff_sync', 'Sync process completed', 
-            JSON.stringify({
-                found: rows.length,
-                success: results.length,
-                errors: errors.length,
-                db_updated: updateResult.affectedRows
-            }), 
-            operatorName
-        );
-
-        return {
+        const summary = {
             message: 'Sync process completed.',
             total_found: rows.length,
             success_count: results.length,
@@ -539,9 +566,16 @@ async function executeGaOffSync(operatorName = 'SYSTEM') {
             }
         };
 
+        console.log(`${logPrefix} Sync completed. Success: ${results.length}, Errors: ${errors.length}, DB Updated: ${updateResult.affectedRows}`);
+        
+        // DB Log: Completion Summary
+        await saveLog('INFO', 'gaoff_sync', 'Sync process completed', summary, operatorName);
+
+        return summary;
+
     } catch (error) {
         console.error(`${logPrefix} Fatal Error:`, error.message);
-        await saveLog('ERROR', 'gaoff_sync', 'Fatal Error in Sync Process', error.message, operatorName);
+        await saveLog('ERROR', 'gaoff_sync', 'Fatal Error in Sync Process', { message: error.message }, operatorName);
         throw error; // Re-throw to be handled by caller
     }
 }
@@ -550,12 +584,16 @@ async function executeGaOffSync(operatorName = 'SYSTEM') {
 app.post('/api/gaoff', authenticateToken, async (req, res) => {
     try {
         const result = await executeGaOffSync(req.user.username);
+        // Log the API Response itself
+        await saveLog('INFO', 'api_gaoff_manual', 'Manual Sync Triggered', result, req.user.username);
         return res.status(200).json(result);
     } catch (error) {
-        return res.status(500).json({
+        const errorResponse = {
             error: 'Internal Server Error during sync process.',
             details: error.message
-        });
+        };
+        await saveLog('ERROR', 'api_gaoff_manual', 'Manual Sync Error', errorResponse, req.user.username);
+        return res.status(500).json(errorResponse);
     }
 });
 
