@@ -455,13 +455,13 @@ app.post('/api/receiving', authenticateToken, async (req, res) => {
     }
 });
 
-// New Route: PUT /api/delivery (Secured)
 app.post('/api/delivery', authenticateToken, async (req, res) => {
     
     console.log(`Authenticated User ${req.user.username} attempting to update delivery_flg.`); 
 
     const { vin_number, date_time } = req.body; 
 
+    // 1. Validation
     if (!vin_number || !date_time) {
         const errorResponse = { 
             error: 'Invalid Input', 
@@ -475,7 +475,7 @@ app.post('/api/delivery', authenticateToken, async (req, res) => {
     const formattedDate = date_time.replace(/\//g, '-');
 
     try {
-        // SELECT delivery_flg and pdiin_flg
+        // 2. Check current status
         const [rows] = await pool.query(
             'SELECT delivery_flg, pdiin_flg FROM gaoff WHERE vin_number = ?',
             [vin_number]
@@ -494,7 +494,7 @@ app.post('/api/delivery', authenticateToken, async (req, res) => {
 
         const vehicleData = rows[0];
 
-        // Condition 1: delivery_flg == 1 (Vehicle already delivered)
+        // Condition 1: Already Delivered
         if (vehicleData.delivery_flg === 1) {
             const conflictResponse = {
                 status: 2, 
@@ -505,7 +505,7 @@ app.post('/api/delivery', authenticateToken, async (req, res) => {
             return res.status(200).json(conflictResponse);
         }
 
-        // Condition 2: pdiin_flg == 0 (Waiting Receive/PDI Incomplete)
+        // Condition 2: Not Received yet (pdiin_flg = 0)
         if (vehicleData.pdiin_flg === 0) {
             const waitingResponse = {
                 status: 3, 
@@ -516,14 +516,31 @@ app.post('/api/delivery', authenticateToken, async (req, res) => {
             return res.status(200).json(waitingResponse);
         }
 
-        //Condition 3: delivery_flg == 0 AND pdiin_flg == 1 (Ready to update)
+        // Condition 3: Ready to update (delivery_flg == 0 AND pdiin_flg == 1)
         if (vehicleData.delivery_flg === 0 && vehicleData.pdiin_flg === 1) {
-             const [updateResult] = await pool.query(
+            
+            // 3. Update gaoff table
+            const [updateResult] = await pool.query(
                 'UPDATE gaoff SET delivery_flg = 1, delivery_time = ? WHERE vin_number = ?',
                 [formattedDate, vin_number]
             );
 
             if (updateResult.affectedRows === 1) {
+                
+                // 4. Update gcms_interface_scot table (แก้ไข: ใช้ pool.query แทน connection.execute)
+                try {
+                    await pool.query(
+                        'UPDATE gcms_interface_scot SET scot_flg = 0 WHERE vin_number = ?',
+                        [vin_number]
+                    );
+                    console.log(`Updated gcms_interface_scot scot_flg=0 for VIN: ${vin_number}`);
+                } catch (scotError) {
+                    // Log error but generally we might not want to fail the whole request if only the interface update fails
+                    // หรือถ้าซีเรียสอาจจะต้องทำ Transaction แต่เบื้องต้น Log ไว้ก่อน
+                    console.error('Error updating gcms_interface_scot:', scotError.message);
+                    await saveLog('ERROR', 'api_delivery', 'Error updating scot_flg', { error: scotError.message }, req.user.username);
+                }
+
                 const successResponse = {
                     status: 1, 
                     message: `Successfully updated delivery_flg to 1 for VIN: ${vin_number}.`,
@@ -534,9 +551,13 @@ app.post('/api/delivery', authenticateToken, async (req, res) => {
                 await saveLog('INFO', 'api_delivery', `Delivery Update Success`, successResponse, req.user.username);
 
                 return res.status(200).json(successResponse);
+            } else {
+                // กรณี Query รันผ่านแต่ไม่มี Row ถูกอัปเดต (อาจเกิด Race Condition น้อยมาก)
+                throw new Error('Update affected 0 rows unexpectedly.');
             }
         }
         
+        // Fallback for unexpected logic state
         const logicErrorResponse = {
             error: 'Internal Logic Error',
             message: 'An unexpected state occurred during the delivery flag update process.'
