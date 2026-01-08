@@ -125,11 +125,14 @@ const authenticateToken = (req, res, next) => {
 };
 
 app.post('/api/login', async (req, res) => {
-    const { username, password } = req.body; 
+    // แก้ไข: รับค่า username และ password จาก Headers แทน Body
+    // Express จะแปลง key ใน headers เป็นตัวพิมพ์เล็กทั้งหมดโดยอัตโนมัติ
+    const username = req.headers['username'];
+    const password = req.headers['password'];
 
     if (!username || !password) {
-        const errorResponse = { error: 'Authentication failed', message: 'Username and password are required.' };
-        await saveLog('WARN', 'api_login', 'Login Failed: Missing credentials', errorResponse, 'UNKNOWN');
+        const errorResponse = { error: 'Authentication failed', message: 'Username and password are required in Headers.' };
+        await saveLog('WARN', 'api_login', 'Login Failed: Missing credentials in Headers', errorResponse, 'UNKNOWN');
         return res.status(400).json(errorResponse);
     }
 
@@ -291,9 +294,9 @@ app.post('/api/receiving', authenticateToken, async (req, res) => {
     const formattedDate = date_time.replace(/\//g, '-');
 
     try {
-
+        // Check current status
         const [checkRows] = await pool.query(
-            'SELECT pdiin_flg FROM gaoff WHERE vin_number = ?',
+            'SELECT id, pdiin_flg, vc_code FROM gaoff WHERE vin_number = ?',
             [vin_number]
         );
         
@@ -317,7 +320,7 @@ app.post('/api/receiving', authenticateToken, async (req, res) => {
              return res.status(409).json(conflictResponse);
         }
         
-        // Update
+        // 1. Update gaoff status
         const [result] = await pool.query(
             'UPDATE gaoff SET pdiin_flg = ?, pdiin_time = ? WHERE vin_number = ?',
             [flagValue, formattedDate, vin_number]
@@ -331,7 +334,104 @@ app.post('/api/receiving', authenticateToken, async (req, res) => {
             await saveLog('ERROR', 'api_receiving', 'Update Failed Unexpectedly', errorResponse, req.user.username);
             return res.status(500).json(errorResponse);
         }
-        
+
+        // ==================================================================================
+        // NEW SECTION: Insert into gcms_interface_dcin
+        // ==================================================================================
+        if (flagValue === 1) { // ทำเฉพาะตอนรับเข้า (pdiin_flg = 1)
+            try {
+                // 2. Query Data ตาม Logic SQL ที่ให้มา
+                // Note: เพิ่ม T1.id (gaoff_id) เข้ามาด้วยเพราะจำเป็นต้องใช้ในการ Insert
+                const sqlGetDetails = `
+                    SELECT 
+                        T1.id AS gaoff_id,
+                        T1.vin_number,
+                        T1.vc_code,
+                        IFNULL(T3.topic, '') AS Model_no,
+                        IFNULL(T3.category_id, '') AS model_id,
+                        IFNULL(T4.topic, '') AS Color,
+                        IFNULL(T4.category_id, '') AS color_id
+                    FROM gaoff AS T1
+                    LEFT JOIN gcms_vehicle_code AS T2 
+                        ON T1.vc_code = T2.vehicle_code
+                    LEFT JOIN gcms_category AS T3 
+                        ON T2.model = T3.category_id AND T3.type = 'vehicle_model'
+                    LEFT JOIN gcms_category AS T4 
+                        ON T2.color = T4.category_id AND T4.type = 'vehicle_color'
+                    WHERE T1.vin_number = ?
+                `;
+
+                const [labelDetails] = await pool.query(sqlGetDetails, [vin_number]);
+
+                if (labelDetails.length > 0) {
+                    const data = labelDetails[0];
+
+                    // 3. Insert into gcms_label
+                    // Note: location_code ใส่เป็นค่าว่าง, print_flg ใส่เป็น 0 (ยังไม่ปริ้น)
+                    const sqlInsertLabel = `
+                        INSERT INTO gcms_label 
+                        (vin_number, vc_code, model, color, location_code, print_flg, received_date) 
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    `;
+
+                    await pool.query(sqlInsertLabel, [
+                        data.vin_number,
+                        data.vc_code,
+                        data.Model_no,
+                        data.Color,
+                        'TRANSIT',  // location_code (default empty)
+                        0,   // print_flg (default 0)
+                        formattedDate
+                    ]);
+
+                    console.log(`Label data inserted for VIN: ${vin_number}`);
+                    await saveLog('INFO', 'api_receiving', 'Inserted into gcms_label', { vin: vin_number }, req.user.username);
+                } else {
+                    console.warn(`Label data extraction failed for VIN: ${vin_number} (No data returned from JOINs)`);
+                    await saveLog('WARN', 'api_receiving', 'Label Data Not Found', { vin: vin_number }, req.user.username);
+                }
+
+                const [dcinDetails] = await pool.query(sqlGetDetails, [vin_number]);
+
+                if (dcinDetails.length > 0) {
+                    const data = dcinDetails[0];
+
+                    // 3. Insert into gcms_interface_dcin
+                    const sqlInsertDcin = `
+                        INSERT INTO gcms_interface_dcin 
+                        (interface_type, dcin_flg, print_flg, gaoff_id, vin_number, vc_code, model, color, location_id, file_name, interface_time) 
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    `;
+
+                    await pool.query(sqlInsertDcin, [
+                        'DCIN',             // interface_type
+                        0,                  // dcin_flg
+                        0,                  // print_flg (0=Waiting Print)
+                        data.gaoff_id,      // gaoff_id
+                        data.vin_number,    // vin_number
+                        data.vc_code,       // vc_code
+                        data.model_id,      // model (ใช้ ID ตามตัวอย่างข้อมูล)
+                        data.color_id,      // color (ใช้ ID ตามตัวอย่างข้อมูล)
+                        'TRANSIT',                 // location_id (Default Empty, หรือใส่ 'TRANSIT' ถ้าต้องการ)
+                        '',                 // file_name
+                        formattedDate       // interface_time
+                    ]);
+
+                    console.log(`DCIN Interface data inserted for VIN: ${vin_number}`);
+                    await saveLog('INFO', 'api_receiving', 'Inserted into gcms_interface_dcin', { vin: vin_number }, req.user.username);
+                } else {
+                    console.warn(`DCIN data extraction failed for VIN: ${vin_number}`);
+                    await saveLog('WARN', 'api_receiving', 'DCIN Data Not Found', { vin: vin_number }, req.user.username);
+                }
+
+            } catch (insertError) {
+                // Log error แต่ไม่ให้กระทบ Flow หลัก
+                console.error('Error inserting gcms_interface_dcin:', insertError.message);
+                await saveLog('ERROR', 'api_receiving', 'Error inserting gcms_interface_dcin', { error: insertError.message }, req.user.username);
+            }
+        }
+        // ==================================================================================
+
         const successResponse = {
             status: 1,
             message: `Successfully updated pdiin_flg to ${flagValue} for VIN: ${vin_number}.`,
@@ -340,7 +440,6 @@ app.post('/api/receiving', authenticateToken, async (req, res) => {
             received_at: formattedDate
         };
 
-        // Log Receiving Update Response
         await saveLog('INFO', 'api_receiving', `Updated pdiin_flg to ${flagValue}`, successResponse, req.user.username);
 
         return res.status(200).json(successResponse);
@@ -519,7 +618,7 @@ async function executeGaOffSync(operatorName = 'SYSTEM') {
                 materialCode: row.materialCode,
                 engine_code: row.enginecode, 
                 productionDate: formatDateForAnji(row.productionDate),
-                flag: row.flag !== null ? String(row.flag) : "0"
+                flag: 0 // Assuming flag is always 0 for this sync
             };
 
             try {
