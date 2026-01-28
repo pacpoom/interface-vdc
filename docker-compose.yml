@@ -3,13 +3,13 @@ version: '3.8'
 services:
   app:
     build: .
-    container_name: node_api_server
+    container_name: node_api_server_prduction
     restart: always
     ports:
-      # Map Port 8085 (เครื่องเรา) -> 4000 (Container)
-      - "8085:4000"
+      # Map Port 8087 (เครื่องเรา) -> 4001 (Container)
+      - "8087:4001"
     environment:
-      - PORT=4000
+      - PORT=4001
       - DB_HOST=${DB_HOST}
       - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD}
@@ -17,8 +17,8 @@ services:
       - DB_PORT=${DB_PORT}
       - JWT_SECRET=${JWT_SECRET}
     networks:
-      - app_network
+      - app_network_prd
 
 networks:
-  app_network:
+  app_network_prd:
     driver: bridge

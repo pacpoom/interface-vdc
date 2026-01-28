@@ -13,8 +13,8 @@ RUN npm install
 # Copy โค้ดทั้งหมด
 COPY . .
 
-# เปิด Port 4000 (เพื่อให้ตรงกับค่าใน .env และ docker-compose)
-EXPOSE 4000
+# เปิด Port 4001 (เพื่อให้ตรงกับค่าใน .env และ docker-compose)
+EXPOSE 4001
 
 # คำสั่งรันโปรแกรม
 CMD ["node", "server.js"]

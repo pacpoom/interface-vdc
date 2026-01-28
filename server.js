@@ -5,7 +5,7 @@ const bcrypt = require('bcrypt');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 4001;
 
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret';
 
@@ -594,10 +594,10 @@ async function executeGaOffSync(operatorName = 'SYSTEM') {
     // DB Log: Start
     await saveLog('INFO', 'gaoff_sync', 'Sync process started', { status: 'started' }, operatorName);
 
-    const TARGET_URL = 'https://gvwms-uat.anji-logistics.com/dataway/api';
+    const TARGET_URL = 'https://gvwms.anji-logistics.com/dataway/api';
     const HEADERS = {
         'Content-Type': 'application/json;charset=utf-8',
-        'appId': '20251208061317673',
+        'appId': '20260112095337583',
         'apiCode': 'thaiMgInbound'
     };
 
